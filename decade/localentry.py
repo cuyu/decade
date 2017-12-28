@@ -8,16 +8,14 @@ import time
 from common import get_host_ip, get_unoccupied_port, is_port_in_use, get_pid_by_name
 from client import Client
 import re
-import psutil
 from colorama import init, Fore, Back, Style
 from logger import setup_logger
 from git import Repo
 import git
 
-
 init()
 
-_REMOTE_ENTRY = 'remoteentry.py'
+_REMOTE_RESOURCE = 'decade_resource'
 _VIRTUAL_ENV_NAME = 'virtual_decade'
 _LOGGER = setup_logger('Main', color=Fore.BLUE)
 
@@ -26,7 +24,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--remote-path",
                         help="project path on remote client")
-    parser.add_argument("--src-entry",
+    parser.add_argument("--entry",
                         help="the entry python file of source code, or a executable file in the remote")
     parser.add_argument("--server-name", default='decade',
                         help="IDE server name (optional, default decade)")
@@ -71,6 +69,13 @@ def setup_virtualenv(client, local_project_path, src_entry, remote_path):
         config_cmd = 'pip install -r {0}'.format(
             os.path.join(remote_path, _find_requirements_until_root(local_project_path, src_path)))
         client.execute(config_cmd)
+
+
+def inject_sitecustomize(commands, client, local_ip, local_port):
+    # hijack export keyword
+    commands.append('source /tmp/{0}/hijack_export.sh'.format(_REMOTE_RESOURCE))
+    # Declare the env variables in remote
+    commands.append('export DECADE_IP={0};export DECADE_PORT={1}'.format(local_ip, local_port))
 
 
 def edit_config_files(f, file_location, local_path, args_list):
@@ -159,7 +164,6 @@ def config_IDE(args, remote_path, project_name, local_path, local_ip, local_port
                         if 'name' in option.attrib.keys() and option.get('name') == 'HOST':
                             option.set('value', local_ip)
                         if 'name' in option.attrib.keys() and option.get('name') == 'pathMappings':
-                            # mappings = option.iter('mapping')
                             for mapping in option.iter('mapping'):
                                 mapping.set('local-root', '$PROJECT_DIR$')
                                 mapping.set('remote-root', remote_path)
@@ -200,28 +204,27 @@ def main():
 
     client = Client(args.hostname, args.ssh_user, args.ssh_password, args.ssh_port)
 
-    client.send_files(os.path.join(pkgutil.get_loader("decade").filename, _REMOTE_ENTRY),
-                      os.path.join(remote_path, _REMOTE_ENTRY))
+    client.send_files(os.path.join(pkgutil.get_loader("decade").filename, _REMOTE_RESOURCE),
+                      os.path.join('/tmp', _REMOTE_RESOURCE))
 
-    # remove download
     # remote project is placed in the local project path. Modify this for consistency
     # local project path is empty
     local_project_path = os.path.join(local_path, project_name)
 
     if not os.path.exists(local_project_path):
         client.fetch_files(remote_path, local_project_path)
-        # If need to download the source code from remote, the project path need to append the project name
-    elif not os.path.exists(os.path.join(local_project_path, _REMOTE_ENTRY)):
-        client.fetch_files(os.path.join(remote_path, _REMOTE_ENTRY),
-                           os.path.join(local_project_path, _REMOTE_ENTRY))
 
     config_IDE(ide_config, remote_path, project_name, local_project_path, local_ip, local_port, ssh_port)
 
-    setup_virtualenv(client, local_project_path, args.src_entry, remote_path)
+    commands = []
+
+    inject_sitecustomize(commands, client, local_ip, local_port)
+
+    # setup_virtualenv(client, local_project_path, args.entry, remote_path)
 
     call(['open', '-a', 'PyCharm', local_project_path])
 
-    _LOGGER.info('Please start the debug server in the PyCharm to continue')
+    _LOGGER.info('>> Please start the debug server in the PyCharm to continue <<')
 
     # use a loop to check if the debugger started(if port is occupied).
     while 1:
@@ -235,15 +238,11 @@ def main():
         time.sleep(10)
     _LOGGER.info('Detect the debugging port is open, ready to start')
 
-    run_remote_cmd = 'python {remote_entry} --remote-path {remote_path} --src-entry {src_entry} --local-ip {ip} --local-port {port}'.format(
-        **{
-            'remote_entry': os.path.join(remote_path, _REMOTE_ENTRY),
-            'remote_path': remote_path,
-            'src_entry': args.src_entry,
-            'ip': local_ip,
-            'port': local_port,
-        })
-    client.execute(run_remote_cmd)
+    if args.entry.endswith('.py'):
+        commands.append('python {0}'.format(args.entry))
+    else:
+        commands.append('source {0}'.format(args.entry))
+    client.execute('\n'.join(commands))
 
 
 if __name__ == "__main__":
